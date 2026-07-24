@@ -1,0 +1,30 @@
+[package]
+name = "ace-tun"
+version = "0.1.0"
+edition = "2024"
+description = "WinTun-based transparent redirect: pulls system traffic into a userland TCP/IP stack and hands flows to a local MITM proxy."
+license = "MIT"
+
+[dependencies]
+base64 = "0.23.0"
+bytes = "1.12.1"
+ipstack = "1.0.1"
+regex = "1.13.1"
+socket2 = "0.6.5"
+thiserror = "2.0.19"
+tokio = { version = "1.53.1", features = ["full"] }
+tokio-util = "0.7"
+tracing = "0.1.44"
+wintun = "0.5.1"
+windows = { version = "0.62.2", features = [
+    "Win32_Foundation",
+    "Win32_NetworkManagement_IpHelper",
+    "Win32_NetworkManagement_Ndis",
+    "Win32_Networking_WinSock",
+    "Win32_System_Threading",
+    "Win32_System_ProcessStatus",
+    "Win32_Security",
+] }
+
+[dev-dependencies]
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
