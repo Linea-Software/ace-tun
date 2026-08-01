@@ -169,20 +169,48 @@ impl Drop for TunAdapter {
 ///
 /// Falling back to the system search path lets `cargo test` and development
 /// builds work when the DLL sits in the target directory.
+///
+/// The local copy is retried a few times before giving up: right after an MSI
+/// install the Windows Installer service can still be finishing up (file
+/// handles held for rollback bookkeeping, Defender's first-touch scan), which
+/// transiently makes `LoadLibraryExW` fail with ERROR_MOD_NOT_FOUND even
+/// though the file is present and valid. A short bounded retry absorbs that
+/// window; the engine starts the tunnel a second later anyway.
 fn load_wintun() -> Result<Wintun> {
+    /// How long to keep retrying the local DLL before falling back.
+    const LOAD_RETRY_ATTEMPTS: u32 = 5;
+    /// Delay between retry attempts.
+    const LOAD_RETRY_DELAY: std::time::Duration = std::time::Duration::from_millis(800);
+
     if let Some(dir) = std::env::current_exe()
         .ok()
         .and_then(|p| p.parent().map(|d| d.to_path_buf()))
     {
         let local = dir.join("wintun.dll");
         if local.exists() {
-            // SAFETY: loading a DLL runs its entry point; `wintun.dll` is the
-            // signed WireGuard driver library and is safe to initialise.
-            match unsafe { wintun::load_from_path(&local) } {
-                Ok(w) => return Ok(w),
-                Err(e) => {
-                    tracing::warn!("wintun.dll at {} failed to load: {e}", local.display());
+            let mut last_error = None;
+            for attempt in 1..=LOAD_RETRY_ATTEMPTS {
+                // SAFETY: loading a DLL runs its entry point; `wintun.dll` is
+                // the signed WireGuard driver library and is safe to
+                // initialise.
+                match unsafe { wintun::load_from_path(&local) } {
+                    Ok(w) => return Ok(w),
+                    Err(e) => {
+                        last_error = Some(e);
+                        tracing::warn!(
+                            "wintun.dll at {} failed to load (attempt {attempt}/{}): {e:?}",
+                            local.display(),
+                            LOAD_RETRY_ATTEMPTS
+                        );
+                        std::thread::sleep(LOAD_RETRY_DELAY);
+                    }
                 }
+            }
+            if let Some(e) = last_error {
+                tracing::warn!(
+                    "giving up on wintun.dll at {} after {LOAD_RETRY_ATTEMPTS} attempts: {e:?}",
+                    local.display()
+                );
             }
         }
     }
