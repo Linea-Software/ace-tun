@@ -196,12 +196,12 @@ fn load_wintun() -> Result<Wintun> {
                 match unsafe { wintun::load_from_path(&local) } {
                     Ok(w) => return Ok(w),
                     Err(e) => {
-                        last_error = Some(e);
                         tracing::warn!(
                             "wintun.dll at {} failed to load (attempt {attempt}/{}): {e:?}",
                             local.display(),
                             LOAD_RETRY_ATTEMPTS
                         );
+                        last_error = Some(e);
                         std::thread::sleep(LOAD_RETRY_DELAY);
                     }
                 }
