@@ -14,16 +14,16 @@ use crate::error::Result;
 use crate::platform::{Backend, PhysicalInterface, ProcessTable};
 
 /// The Linux implementation of the [`Backend`] seam.
-pub(crate) struct LinuxBackend;
+pub struct LinuxBackend;
 
 /// The Linux implementation of the [`ProcessTable`] seam.
-pub(crate) struct LinuxProcessTable;
+pub struct LinuxProcessTable;
 
 impl Backend for LinuxBackend {
     type Adapter = adapter::TunAdapter;
 
-    fn create_privileged(ipv6: bool) -> Result<Self::Adapter> {
-        adapter::TunAdapter::create(ipv6)
+    fn create_privileged(ipv6: bool, iface: &PhysicalInterface) -> Result<Self::Adapter> {
+        adapter::TunAdapter::create(ipv6, iface)
     }
 
     fn discover_physical_interface() -> PhysicalInterface {
@@ -36,8 +36,8 @@ impl Backend for LinuxBackend {
 }
 
 impl ProcessTable for LinuxProcessTable {
-    fn resolve_pid(local_ip: std::net::IpAddr, local_port: u16, is_udp: bool) -> Option<u32> {
-        process::resolve_pid(local_ip, local_port, is_udp)
+    fn resolve_pid(local: std::net::SocketAddr, remote: std::net::SocketAddr, is_udp: bool) -> Option<u32> {
+        process::resolve_pid(local, remote, is_udp)
     }
 
     fn process_name(pid: u32) -> Option<String> {

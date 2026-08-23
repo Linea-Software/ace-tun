@@ -55,8 +55,9 @@ pub enum Error {
         source: std::io::Error,
     },
 
-    /// The process is not running elevated, which WinTun requires.
-    #[error("administrator privileges are required to create a WinTun adapter")]
+    /// The process does not have the privileges the virtual adapter requires
+    /// (administrator on Windows, `CAP_NET_ADMIN`/root on Linux, root on macOS).
+    #[error("administrator or root privileges are required to create the virtual adapter")]
     NotElevated,
 
     /// The redirect engine is already running.

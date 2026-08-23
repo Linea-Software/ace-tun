@@ -7,8 +7,9 @@
 //! reach the internet. That is an infinite loop: our own upstream connection
 //! re-enters the netstack, which opens another upstream connection, and so on.
 //!
-//! The fix is a per-OS socket option (`IP_UNICAST_IF` on Windows/Linux,
-//! `IP_BOUND_IF` on macOS — see [`crate::platform`]). It tells the OS to send
+//! The fix is a per-OS socket option (`IP_UNICAST_IF` on Windows,
+//! `SO_BINDTODEVICE` on Linux, `IP_BOUND_IF` on macOS — see
+//! [`crate::platform`]). It tells the OS to send
 //! this socket's packets out of a specific interface, *bypassing the routing
 //! table entirely*. We capture the internet-facing interface index once at
 //! startup, before our routes exist (see
@@ -17,10 +18,11 @@
 //! nothing has to know about which process or destination is involved.
 //!
 //! This is the same mechanism WireGuard's own client uses on each OS to keep
-//! its UDP transport outside its own tunnel. The byte order of the index
-//! differs per OS; the per-OS encoder lives in the platform module and is
-//! unit-tested there, because getting it wrong silently pins the socket to a
-//! nonexistent interface, which manifests as "all outbound traffic hangs".
+//! its UDP transport outside its own tunnel. The byte order and option
+//! semantics differ per OS; the per-OS implementation lives in the platform
+//! module and is unit-tested there, because getting it wrong silently pins the
+//! socket to a nonexistent interface, which manifests as "all outbound
+//! traffic hangs".
 
 use std::io;
 use std::net::SocketAddr;
@@ -65,7 +67,7 @@ pub(crate) async fn tcp(dest: SocketAddr, iface: &PhysicalInterface) -> io::Resu
 
     if let Some(index) = iface.index_for(dest.ip()) {
         // A pin failure is not fatal — log-and-continue beats refusing to dial.
-        if let Err(e) = pin_socket(raw_handle(&socket), index, dest.is_ipv6()) {
+        if let Err(e) = pin_socket(raw_handle(&socket), index, dest.ip()) {
             tracing::warn!("could not pin outbound socket to interface {index}: {e}");
         }
     }
@@ -91,7 +93,7 @@ pub(crate) async fn udp(dest: SocketAddr, iface: &PhysicalInterface) -> io::Resu
     let socket = UdpSocket::bind(bind).await?;
 
     if let Some(index) = iface.index_for(dest.ip())
-        && let Err(e) = pin_socket(raw_handle(&socket), index, dest.is_ipv6())
+        && let Err(e) = pin_socket(raw_handle(&socket), index, dest.ip())
     {
         tracing::warn!("could not pin outbound UDP socket to interface {index}: {e}");
     }

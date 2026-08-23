@@ -14,10 +14,10 @@ use crate::error::Result;
 use crate::platform::{Backend, PhysicalInterface, ProcessTable};
 
 /// The macOS implementation of the [`Backend`] seam.
-pub(crate) struct MacosBackend;
+pub struct MacosBackend;
 
 /// The macOS implementation of the [`ProcessTable`] seam.
-pub(crate) struct MacosProcessTable;
+pub struct MacosProcessTable;
 
 impl Backend for MacosBackend {
     type Adapter = adapter::TunAdapter;

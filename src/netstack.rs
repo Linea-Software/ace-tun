@@ -214,7 +214,7 @@ pub(crate) async fn run(
 /// socket is guaranteed to exist in the kernel's table, because the SYN we are
 /// responding to could not have been sent otherwise.
 fn attribute(src: SocketAddr, dest: SocketAddr, is_udp: bool) -> (Option<u32>, String) {
-    let pid = crate::platform::resolve_pid(src.ip(), src.port(), is_udp);
+    let pid = crate::platform::resolve_pid(src, dest, is_udp);
     let name = pid
         .and_then(crate::platform::process_name)
         .map(|n| n.to_ascii_lowercase())

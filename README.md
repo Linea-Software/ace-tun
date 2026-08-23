@@ -1,13 +1,14 @@
 # ace-tun
 
-A WinTun-based transparent redirect for Windows. It creates a virtual network
-adapter, points the routing table at it, runs a userland TCP/IP stack over the
-raw IP packets that arrive, and hands each terminated flow to a local MITM proxy
-— or connects it straight out, or drops it.
+A transparent redirect for Windows, Linux, and macOS. It creates a virtual
+network adapter (WinTun on Windows, a TUN device on Linux/macOS), points the
+routing table at it, runs a userland TCP/IP stack over the raw IP packets that
+arrive, and hands each terminated flow to a local MITM proxy — or connects it
+straight out, or drops it.
 
 ```
-  app ──routes──▶ WinTun adapter ──▶ userland netstack ──┬─▶ MITM proxy ──▶ internet
-                                                         └─▶ direct socket ─▶ internet
+  app ──routes──▶ TUN adapter ──▶ userland netstack ──┬─▶ MITM proxy ──▶ internet
+                                                      └─▶ direct socket ─▶ internet
 ```
 
 This crate replaces `proxy-redirect`, a WinDivert packet-interception layer.
@@ -50,18 +51,23 @@ dependence on the machine's UI language.
 
 Once the tunnel owns the routing table, the engine's *own* upstream connections
 would route into it too, and each one would open another upstream connection.
-The guard is `IP_UNICAST_IF`, which pins a socket to a specific interface and
-bypasses the routing table entirely. We discover the internet-facing interface
-once at startup — **before** installing our routes, so the answer describes the
-real network — and pin every outbound socket to it.
+The guard is a per-OS socket option that pins a socket to a specific interface
+and bypasses the routing table entirely. We discover the internet-facing
+interface once at startup — **before** installing our routes, so the answer
+describes the real network — and pin every outbound socket to it.
 
-This is the same mechanism WireGuard's own Windows client uses to keep its UDP
-transport outside its own tunnel.
+| OS | Mechanism | Notes |
+|---|---|---|
+| Windows | `IP_UNICAST_IF` / `IPV6_UNICAST_IF` | index in **network** byte order for v4, **host** order for v6 — see the byte-order trap below |
+| Linux | `SO_BINDTODEVICE` | `IP_UNICAST_IF` does *not* affect the connect-time route lookup there, so the SYN would still enter the tunnel; `SO_BINDTODEVICE` sets `sk_bound_dev_if`, which `tcp_v4_connect` honours. Requires `CAP_NET_RAW`. Loopback destinations are left unpinned (the local table already keeps them out of the tunnel). |
+| macOS | `IP_BOUND_IF` / `IPV6_BOUND_IF` | plain index (Phase 2) |
 
-> **Byte-order trap:** `IP_UNICAST_IF` takes the interface index in *network*
-> byte order; `IPV6_UNICAST_IF` takes it in *host* byte order. Getting this
-> wrong silently pins the socket to a nonexistent interface, which looks like
-> "all outbound traffic hangs". See `unicast_if_value` in `src/dial.rs`.
+> **Byte-order trap:** on Windows, `IP_UNICAST_IF` takes the interface index
+> in *network* byte order; `IPV6_UNICAST_IF` takes it in *host* byte order.
+> (Linux takes network order for both, but does not use these options.)
+> Getting this wrong silently pins the socket to a nonexistent interface,
+> which looks like "all outbound traffic hangs". See `unicast_if_value` in
+> `src/platform/<os>/dial.rs`.
 
 If no interface can be discovered for a family, our own flows in that family are
 **dropped** rather than relayed — an unpinned relay would loop forever, and the
@@ -93,12 +99,16 @@ does not depend on our cleanup code running.
 
 ## Requirements
 
-* **Administrator privileges.** WinTun cannot create an adapter otherwise.
-  `TunRedirect::start` returns `Error::NotElevated` so callers can degrade
-  gracefully instead of failing obscurely.
-* **`wintun.dll` next to the executable.** See below.
+* **Windows:** administrator privileges (WinTun cannot create an adapter
+  otherwise) and `wintun.dll` next to the executable — see below.
+* **Linux:** root, or `CAP_NET_ADMIN` + `CAP_NET_RAW` (the TUN device and the
+  `SO_BINDTODEVICE` loop guard).
+* **macOS:** root (Phase 2).
 
-## Bundling `wintun.dll`
+`TunRedirect::start` returns `Error::NotElevated` so callers can degrade
+gracefully instead of failing obscurely.
+
+## Bundling `wintun.dll` (Windows only)
 
 The official WinTun distribution is vendored at `thirdparty/wintun/` —
 **version 0.14.1**, Authenticode-signed by `CN=WireGuard LLC`. It ships all four
@@ -171,17 +181,21 @@ to send as SNI upstream, so DNS snooping is load-bearing, not just diagnostic.
   HTTP `CONNECT` proxy, so a `Proxy` action on a UDP flow relays it directly
   rather than dropping it.
 * **Multicast and broadcast are dropped, not relayed.** Our split-default routes
-  cover the whole address space, and Windows then auto-creates a `224.0.0.0/4`
-  route on the tunnel that wins on metric — so mDNS (5353), SSDP (1900) and
+  cover the whole address space. Windows then auto-creates a `224.0.0.0/4`
+  route on the tunnel that wins on metric, so mDNS (5353), SSDP (1900) and
   LLMNR (5355) all arrive here. They cannot be relayed through a pinned,
   `connect`ed unicast socket in any meaningful way, and attempting it burns one
   socket per packet, which exhausts Windows' socket buffers on a busy LAN
   (`WSAENOBUFS`). Dropping them means **LAN device discovery does not work while
-  the tunnel is up** — no Chromecast, network printer, or SMB browsing. Watch
-  `StatsSnapshot::group_dropped` to see the volume involved. If discovery turns
-  out to matter, the better fix is to delete the auto-created `224.0.0.0/4`
-  route from the tunnel interface at startup so multicast falls back to the
-  physical NIC's own route.
+  the tunnel is up** on Windows — no Chromecast, network printer, or SMB
+  browsing. Watch `StatsSnapshot::group_dropped` to see the volume involved.
+  On Linux the problem does not arise: no auto-route is created, and the
+  backend instead installs `224.0.0.0/4` and `ff00::/8` routes via the
+  discovered physical NIC, so multicast never enters the tunnel.
+
+  Note: after a hard kill (`SIGKILL`) on Linux, those two group routes survive
+  (they point at the physical NIC, not the tunnel). They are inert — multicast
+  keeps flowing on the real network — and a graceful stop removes them.
 
 ## Testing
 

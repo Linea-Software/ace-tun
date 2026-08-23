@@ -7,7 +7,7 @@ pub(crate) mod dial;
 pub(crate) mod netcfg;
 pub(crate) mod process;
 
-use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 
 use crate::error::Result;
 use crate::platform::{Backend, PhysicalInterface, ProcessTable};
@@ -27,7 +27,7 @@ pub struct WindowsProcessTable;
 impl Backend for WindowsBackend {
     type Adapter = adapter::TunAdapter;
 
-    fn create_privileged(ipv6: bool) -> Result<Self::Adapter> {
+    fn create_privileged(ipv6: bool, _iface: &PhysicalInterface) -> Result<Self::Adapter> {
         adapter::TunAdapter::create(ipv6)
     }
 
@@ -44,8 +44,8 @@ impl Backend for WindowsBackend {
 }
 
 impl ProcessTable for WindowsProcessTable {
-    fn resolve_pid(local_ip: IpAddr, local_port: u16, is_udp: bool) -> Option<u32> {
-        process::resolve_pid(local_ip, local_port, is_udp)
+    fn resolve_pid(local: SocketAddr, _remote: SocketAddr, is_udp: bool) -> Option<u32> {
+        process::resolve_pid(local.ip(), local.port(), is_udp)
     }
 
     fn process_name(pid: u32) -> Option<String> {

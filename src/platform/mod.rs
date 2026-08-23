@@ -19,20 +19,20 @@
 //! # Socket pinning and byte order
 //!
 //! The loop guard pins every outbound socket to the physical interface
-//! discovered before our routes existed. The socket option and its byte order
-//! differ per OS — getting this wrong silently pins sockets to a nonexistent
-//! interface, which looks like "all outbound traffic hangs":
+//! discovered before our routes existed. The mechanism differs per OS — on
+//! Linux it is `SO_BINDTODEVICE` (see `platform/linux/dial.rs` for why), on
+//! Windows the `*_UNICAST_IF` options, on macOS `*_BOUND_IF`:
 //!
 //! | OS | Option | Byte order |
 //! |---|---|---|
 //! | Windows | `IP_UNICAST_IF` / `IPV6_UNICAST_IF` | v4 **network**, v6 **host** |
-//! | Linux | `IP_UNICAST_IF` / `IPV6_UNICAST_IF` | **network** for both |
+//! | Linux | `SO_BINDTODEVICE` (name-based) | n/a; the `*_UNICAST_IF` options take **network** order for both families but do not affect connect-time routing |
 //! | macOS | `IP_BOUND_IF` / `IPV6_BOUND_IF` | **host** for both |
 //!
-//! Each OS module implements its own `unicast_if_value` and unit-tests it, so
-//! the trap cannot silently reappear on a new target.
+//! Each OS module implements its own pinning and unit-tests it, so the
+//! Windows byte-order trap cannot silently reappear on a new target.
 
-use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 
 use crate::error::{Error, Result};
 
@@ -117,7 +117,7 @@ impl PhysicalInterface {
 /// A live adapter handle: session for the async device, teardown.
 pub(crate) trait AdapterHandle {
     /// A handle to the packet device, for building the async device.
-    fn session(&self) -> crate::device::SessionHandle;
+    fn session(&self) -> std::io::Result<crate::device::SessionHandle>;
     /// Stop the session, unblocking the device reader (Windows), or no-op where
     /// the device is a plain fd (Unix).
     fn shutdown_session(&self);
@@ -139,17 +139,19 @@ pub(crate) trait Backend {
 
     /// Create the adapter, assign addresses, and install routes.
     ///
-    /// Returns [`Error::NotElevated`] when the process lacks the privileges the
+    /// `iface` is the physical interface discovered just before this call; the
+    /// Linux backend uses it to keep multicast on the real NIC. Returns
+    /// [`Error::NotElevated`] when the process lacks the privileges the
     /// current OS requires, leaving the machine's networking untouched.
-    fn create(ipv6: bool) -> Result<Self::Adapter> {
+    fn create(ipv6: bool, iface: &PhysicalInterface) -> Result<Self::Adapter> {
         if !Self::is_privileged() {
             return Err(Error::NotElevated);
         }
-        Self::create_privileged(ipv6)
+        Self::create_privileged(ipv6, iface)
     }
 
     /// OS-specific creation, called only when [`Backend::is_privileged`] held.
-    fn create_privileged(ipv6: bool) -> Result<Self::Adapter>;
+    fn create_privileged(ipv6: bool, iface: &PhysicalInterface) -> Result<Self::Adapter>;
 
     /// Discover the internet-facing interface for both families, before our
     /// own routes exist.
@@ -159,11 +161,15 @@ pub(crate) trait Backend {
     fn is_privileged() -> bool;
 }
 
-/// Per-OS process attribution: map a local endpoint to a PID, and a PID to an
-/// executable name.
+/// Per-OS process attribution: map a flow's endpoints to a PID, and a PID to
+/// an executable name.
 pub(crate) trait ProcessTable {
-    /// Resolve the PID that owns the given local endpoint, or `None`.
-    fn resolve_pid(local_ip: IpAddr, local_port: u16, is_udp: bool) -> Option<u32>;
+    /// Resolve the PID that owns the flow's local endpoint, or `None`.
+    ///
+    /// `remote` is the flow's destination — the owning socket's peer. Some
+    /// platforms need it: the Linux kernel hashes established TCP sockets by
+    /// the full four-tuple, so a local-endpoint-only query cannot find them.
+    fn resolve_pid(local: SocketAddr, remote: SocketAddr, is_udp: bool) -> Option<u32>;
     /// Resolve the executable *file name* for a PID, e.g. `chrome.exe`.
     fn process_name(pid: u32) -> Option<String>;
 }
@@ -201,8 +207,8 @@ pub(crate) use self::macos::dial::{pin_socket, set_send_buffer};
 pub(crate) type TunAdapter = <BackendImpl as Backend>::Adapter;
 
 /// Resolve the PID that owns the given local endpoint. See [`ProcessTable`].
-pub(crate) fn resolve_pid(local_ip: IpAddr, local_port: u16, is_udp: bool) -> Option<u32> {
-    ProcessTableImpl::resolve_pid(local_ip, local_port, is_udp)
+pub(crate) fn resolve_pid(local: SocketAddr, remote: SocketAddr, is_udp: bool) -> Option<u32> {
+    ProcessTableImpl::resolve_pid(local, remote, is_udp)
 }
 
 /// Resolve the executable file name for a PID. See [`ProcessTable`].

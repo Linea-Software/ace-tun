@@ -17,6 +17,7 @@
 //! [`unicast_if_value`] encodes the rule and is unit-tested.
 
 use std::io;
+use std::net::IpAddr;
 
 use windows::Win32::Networking::WinSock::{
     IP_UNICAST_IF, IPPROTO_IP, IPPROTO_IPV6, IPV6_UNICAST_IF, SO_SNDBUF, SOCKET, SOCKET_ERROR,
@@ -32,7 +33,12 @@ pub(crate) fn unicast_if_value(index: u32, is_ipv6: bool) -> u32 {
 }
 
 /// Apply `IP_UNICAST_IF` / `IPV6_UNICAST_IF` to a raw socket handle.
-pub(crate) fn pin_socket(raw: u64, index: u32, is_ipv6: bool) -> io::Result<()> {
+///
+/// The destination address is ignored on Windows; it exists so the portable
+/// dialing code can hand the per-OS pinning the full picture (Linux needs it
+/// to skip loopback destinations for `SO_BINDTODEVICE`).
+pub(crate) fn pin_socket(raw: u64, index: u32, dest: IpAddr) -> io::Result<()> {
+    let is_ipv6 = dest.is_ipv6();
     let value = unicast_if_value(index, is_ipv6);
     let bytes = value.to_ne_bytes();
     let (level, optname) = if is_ipv6 {

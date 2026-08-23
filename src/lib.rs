@@ -352,14 +352,14 @@ impl TunRedirect {
         // and the value would be identical anyway.
         let _ = self.shared.iface.set(iface);
 
-        let tun = BackendImpl::create(self.ipv6)?;
+        let tun = BackendImpl::create(self.ipv6, &iface)?;
         self.shared.log(format!(
             "adapter '{ADAPTER_NAME}' up: {TUN_IPV4} (mtu {TUN_MTU}); \
              outbound traffic pinned to interface v4={:?} v6={:?}",
             iface.v4_index, iface.v6_index
         ));
 
-        let (device, reader) = TunDevice::new(tun.session())?;
+        let (device, reader) = TunDevice::new(tun.session()?)?;
 
         let mut cfg = IpStackConfig::default();
         cfg.mtu_unchecked(TUN_MTU);

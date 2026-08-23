@@ -144,7 +144,7 @@ impl Rule {
 
     fn compile(&self) -> CompiledRule {
         CompiledRule {
-            process_matchers: compile_glob_list(&self.process_names),
+            process_matchers: compile_process_list(&self.process_names),
             process_wildcard: is_match_all(&self.process_names),
             hosts: self.hosts.clone(),
             hosts_all: is_match_all(&self.hosts),
@@ -282,9 +282,13 @@ impl CompiledRule {
         if self.process_wildcard {
             return true;
         }
+        // Rules are typically written against Windows names (`chrome.exe`) but
+        // run against whatever the platform resolves (`chrome` on Linux);
+        // compare both sides without the `.exe` suffix.
+        let name = strip_exe_suffix(process_name);
         self.process_matchers
             .iter()
-            .any(|m| m.is_match(process_name))
+            .any(|m| m.is_match(name))
     }
 
     fn matches_target(&self, dest: IpAddr, dest_port: u16, domain: Option<&str>) -> bool {
@@ -325,6 +329,36 @@ fn compile_glob_list(list: &str) -> Vec<Regex> {
         return Vec::new();
     }
     split_list(list).filter_map(compile_glob).collect()
+}
+
+/// Compile a process-name list, stripping Windows `.exe` suffixes first.
+///
+/// The engine configures rules with Windows names (`chrome.exe;brave.exe`);
+/// on Linux the same processes resolve as `chrome`, `brave`. Normalizing both
+/// sides (see [`CompiledRule::matches_process`]) keeps those rule strings
+/// unchanged on every platform.
+fn compile_process_list(list: &str) -> Vec<Regex> {
+    if is_match_all(list) {
+        return Vec::new();
+    }
+    split_list(list)
+        .map(strip_exe_suffix)
+        .filter_map(compile_glob)
+        .collect()
+}
+
+/// Strip a trailing `.exe` (case-insensitively) from a process name or rule
+/// token. Globs keep their special characters: `chrome*` is untouched, while
+/// `chrome.exe` becomes `chrome`.
+fn strip_exe_suffix(token: &str) -> &str {
+    const SUFFIX: &str = ".exe";
+    if token.len() >= SUFFIX.len()
+        && token[token.len() - SUFFIX.len()..].eq_ignore_ascii_case(SUFFIX)
+    {
+        &token[..token.len() - SUFFIX.len()]
+    } else {
+        token
+    }
 }
 
 /// Convert a case-insensitive glob (`*`, `?`) into an anchored [`Regex`].
@@ -701,6 +735,82 @@ mod tests {
                 .action,
             RuleAction::Direct
         );
+    }
+
+    /// Engine rule strings keep Windows names (`chrome.exe`); on Linux the
+    /// same processes resolve as `chrome`. The `.exe` suffix must not break
+    /// matching in either direction.
+    #[test]
+    fn windows_exe_rules_match_unix_process_names() {
+        let rules = [Rule::new("chrome.exe;brave.exe").action(RuleAction::Block)];
+        let set = RuleSet::new(&rules);
+        // Linux process names carry no suffix.
+        assert_eq!(
+            set.evaluate("chrome", v4("1.2.3.4"), 443, false, None).action,
+            RuleAction::Block
+        );
+        assert_eq!(
+            set.evaluate("brave", v4("1.2.3.4"), 443, false, None).action,
+            RuleAction::Block
+        );
+        // Windows names still match (both sides normalized).
+        assert_eq!(
+            set.evaluate("CHROME.EXE", v4("1.2.3.4"), 443, false, None)
+                .action,
+            RuleAction::Block
+        );
+        // Unrelated process does not match.
+        assert_eq!(
+            set.evaluate("firefox", v4("1.2.3.4"), 443, false, None).action,
+            RuleAction::Direct
+        );
+    }
+
+    /// Rules authored without a suffix (`firefox`) match Windows names too.
+    #[test]
+    fn unix_style_rules_match_windows_process_names() {
+        let rules = [Rule::new("firefox").action(RuleAction::Block)];
+        let set = RuleSet::new(&rules);
+        assert_eq!(
+            set.evaluate("firefox.exe", v4("1.2.3.4"), 443, false, None)
+                .action,
+            RuleAction::Block
+        );
+    }
+
+    /// Glob suffixes are preserved: `chrome*` must still match `chrome.exe`,
+    /// and `*.exe` degenerates to `*` only because every Windows binary has
+    /// the suffix anyway.
+    #[test]
+    fn glob_patterns_survive_exe_normalization() {
+        let rules = [Rule::new("chrome*").action(RuleAction::Block)];
+        let set = RuleSet::new(&rules);
+        assert_eq!(
+            set.evaluate("chrome.exe", v4("1.2.3.4"), 443, false, None)
+                .action,
+            RuleAction::Block
+        );
+        assert_eq!(
+            set.evaluate("chrome-helper", v4("1.2.3.4"), 443, false, None)
+                .action,
+            RuleAction::Block
+        );
+        assert_eq!(
+            set.evaluate("chromium", v4("1.2.3.4"), 443, false, None).action,
+            RuleAction::Direct
+        );
+    }
+
+    #[test]
+    fn strip_exe_suffix_is_case_insensitive_and_globsafe() {
+        assert_eq!(strip_exe_suffix("chrome.exe"), "chrome");
+        assert_eq!(strip_exe_suffix("CHROME.EXE"), "CHROME");
+        assert_eq!(strip_exe_suffix("Brave.Exe"), "Brave");
+        assert_eq!(strip_exe_suffix("firefox"), "firefox");
+        assert_eq!(strip_exe_suffix("chrome*"), "chrome*");
+        assert_eq!(strip_exe_suffix("*.exe"), "*");
+        assert_eq!(strip_exe_suffix("a?.exe"), "a?");
+        assert_eq!(strip_exe_suffix(""), "");
     }
 
     #[test]

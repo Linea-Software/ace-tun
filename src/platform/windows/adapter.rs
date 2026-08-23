@@ -118,8 +118,8 @@ impl TunAdapter {
 }
 
 impl AdapterHandle for TunAdapter {
-    fn session(&self) -> SessionHandle {
-        Arc::clone(&self.session)
+    fn session(&self) -> std::io::Result<SessionHandle> {
+        Ok(Arc::clone(&self.session))
     }
 
     fn shutdown_session(&self) {
