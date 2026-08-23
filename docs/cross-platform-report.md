@@ -493,3 +493,61 @@ lookup hashes on `dport`/`dst` and scores `sk_dport == sport`,
 - Process-name normalization (`.exe` stripping) lives in `rule.rs` matching,
   so engine rule strings (`chrome.exe`) match Linux names (`chrome`) and vice
   versa on every platform.
+
+### 8.4 macOS (Phase 2) — implemented, compiled, not yet run on hardware
+
+The macOS backend (`src/platform/macos/`) is implemented behind the same
+seams as Linux. It compiles and passes clippy for both `x86_64-apple-darwin`
+and `aarch64-apple-darwin` (checked from the Windows development machine; test
+binaries cannot be linked without a macOS SDK). **Nothing has been run on a
+real Mac** — the items marked *needs a Mac* below are the first things to
+verify there. The struct layouts and ioctl numbers were transcribed from the
+macOS 14 xnu sources (linked in §7) and are pinned by compile-time assertions
+and unit tests; the `pcblist_n` parser tests construct synthetic tables and
+must be run with `cargo test` on a Mac.
+
+- **Device** (`adapter.rs`) — utun via the `com.apple.net.utun_control` kernel
+  control (socket + `CTLIOCGINFO` + `connect` with unit 0, which makes the
+  kernel assign the lowest free `utunN`; name read back via `UTUN_OPT_IFNAME`).
+  The fd owns the interface, so the hard-kill property holds exactly as on
+  Linux. `ADAPTER_NAME` is `"utun%d"` — informational only, macOS does not
+  accept a name template.
+- **AF header** (`device.rs`) — utun prepends a 4-byte protocol-family header
+  to every datagram. It is big-endian on the wire (`xnu`'s `utun_input`
+  byte-swaps with `ntohl`); writes prepend `AF_INET` (2) / `AF_INET6` (30) as
+  `u32::to_be_bytes`, reads strip 4 bytes. *Needs a Mac:* the end-to-end
+  framing.
+- **Netcfg** (`netcfg.rs`) — addresses via `SIOCAIFADDR` / `SIOCAIFADDR_IN6`
+  (v4 broadcast slot = the address itself, point-to-point with no peer; v6
+  gets `IN6_IFF_NODAD` + infinite lifetimes, mirroring tun-rs), MTU and link
+  up via `SIOCSIFMTU` / `SIOCGIFFLAGS`+`SIOCSIFFLAGS`. Routes via `/sbin/route`
+  (`add -inet6/-inet <dest>/<prefix> -interface <if>`; delete by destination
+  only). Exit-code handling: `File exists` on add and `not in table` /
+  `No such process` on delete count as success (idempotent). Physical
+  interface discovery parses `route -n get` output. *Needs a Mac:* the route
+  command's exact stderr strings on current macOS, and whether IPv6 `::/1`
+  needs `-inet6` passed before `add` on any supported version.
+- **Dial** (`dial.rs`) — `IP_BOUND_IF` (25) / `IPV6_BOUND_IF` (125), plain
+  host-order index for both families (libc constants pinned by a test).
+  Loopback destinations are left unpinned; *needs a Mac:* confirm the local
+  table accepts an `ifscope`-constrained lookup to 127/8 (the Linux kernel
+  rejects it, which is why the skip exists).
+- **Process** (`process.rs`) — `net.inet.{tcp,udp}.pcblist_n` via
+  `sysctlbyname` (size-then-fetch), records walked by `xi_len`/`xso_len`.
+  Layouts transcribed from xnu `in_pcb.h` / `socketvar.h` (`#pragma pack(4)`):
+  ports at 16/18 (network order), `inp_vflag` at 44, addresses at 48/64
+  (v4 in the 4-in-6 slot), `so_last_pid` at 68 in `xsocket_n` — pinned by
+  `#[repr(C, packed(4))]` mirror structs + compile-time `offset_of!` asserts.
+  Matching scores records (full four-tuple > specific local > wildcard) so an
+  accepted socket beats the listener it hangs off. Kernel < 10.15 fails open
+  (no `pcblist_n` → `None`). Process names via `proc_pidinfo`
+  (`PROC_PIDT_SHORTBSDINFO` → `pbi_comm`, no `.exe`). *Needs a Mac:* the
+  `so_last_pid` value for live flows, the 250 ms cache's hit rate, and the
+  table-walk against real kernels (several macOS versions).
+- **Privilege** — `geteuid() == 0`, mapped to `Error::NotElevated`; `EPERM`
+  from the control socket is mapped the same way as a second line of defense.
+
+Untested-on-hardware caveats: `route` stderr strings, `so_last_pid` semantics
+for UDP (unconnected sockets attribute to the last sender), and the
+`IP_BOUND_IF` loop-guard behaviour on a real network. The report's §3.3 table
+stands as written for macOS (`IP_BOUND_IF`, host order for both families).

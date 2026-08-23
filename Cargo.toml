@@ -23,6 +23,9 @@ netlink-packet-route = "0.19"
 netlink-packet-sock-diag = "0.4"
 netlink-sys = "0.8"
 
+[target.'cfg(target_os = "macos")'.dependencies]
+libc = "0.2"
+
 [target.'cfg(windows)'.dependencies]
 wintun = "0.5.1"
 windows = { version = "0.62.2", features = [

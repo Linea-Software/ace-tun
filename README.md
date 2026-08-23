@@ -60,7 +60,7 @@ describes the real network — and pin every outbound socket to it.
 |---|---|---|
 | Windows | `IP_UNICAST_IF` / `IPV6_UNICAST_IF` | index in **network** byte order for v4, **host** order for v6 — see the byte-order trap below |
 | Linux | `SO_BINDTODEVICE` | `IP_UNICAST_IF` does *not* affect the connect-time route lookup there, so the SYN would still enter the tunnel; `SO_BINDTODEVICE` sets `sk_bound_dev_if`, which `tcp_v4_connect` honours. Requires `CAP_NET_RAW`. Loopback destinations are left unpinned (the local table already keeps them out of the tunnel). |
-| macOS | `IP_BOUND_IF` / `IPV6_BOUND_IF` | plain index (Phase 2) |
+| macOS | `IP_BOUND_IF` / `IPV6_BOUND_IF` | plain interface index in **host** byte order for both families — the connect-time lookup honours the bound interface, so the SYN never enters the tunnel |
 
 > **Byte-order trap:** on Windows, `IP_UNICAST_IF` takes the interface index
 > in *network* byte order; `IPV6_UNICAST_IF` takes it in *host* byte order.
@@ -92,10 +92,11 @@ unattributable UDP/443 flow is exactly the bypass this rewrite exists to close.
 Routes are removed on stop, on drop, and on netstack panic (a watchdog task
 supervises the netstack and tears down whichever way it ends).
 
-If the process dies without running any of that, Windows closes the adapter
-handle, WinTun destroys the adapter, and the routes bound to its LUID go with
-it. **Hard-kill restores normal connectivity by itself** — the safety property
-does not depend on our cleanup code running.
+If the process dies without running any of that, the adapter is destroyed —
+Windows closes the WinTun handle and the routes bound to its LUID go with it;
+on Linux and macOS the non-persistent TUN/utun interface dies with its last
+fd, taking its routes along. **Hard-kill restores normal connectivity by
+itself** — the safety property does not depend on our cleanup code running.
 
 ## Requirements
 
@@ -103,7 +104,8 @@ does not depend on our cleanup code running.
   otherwise) and `wintun.dll` next to the executable — see below.
 * **Linux:** root, or `CAP_NET_ADMIN` + `CAP_NET_RAW` (the TUN device and the
   `SO_BINDTODEVICE` loop guard).
-* **macOS:** root (Phase 2).
+* **macOS:** root (utun creation requires root or the packet-tunnel
+  entitlement).
 
 `TunRedirect::start` returns `Error::NotElevated` so callers can degrade
 gracefully instead of failing obscurely.
@@ -189,13 +191,14 @@ to send as SNI upstream, so DNS snooping is load-bearing, not just diagnostic.
   (`WSAENOBUFS`). Dropping them means **LAN device discovery does not work while
   the tunnel is up** on Windows — no Chromecast, network printer, or SMB
   browsing. Watch `StatsSnapshot::group_dropped` to see the volume involved.
-  On Linux the problem does not arise: no auto-route is created, and the
-  backend instead installs `224.0.0.0/4` and `ff00::/8` routes via the
-  discovered physical NIC, so multicast never enters the tunnel.
+  On Linux and macOS the problem does not arise: no auto-route is created,
+  and the backend instead installs `224.0.0.0/4` and `ff00::/8` routes via
+  the discovered physical NIC, so multicast never enters the tunnel.
 
-  Note: after a hard kill (`SIGKILL`) on Linux, those two group routes survive
-  (they point at the physical NIC, not the tunnel). They are inert — multicast
-  keeps flowing on the real network — and a graceful stop removes them.
+  Note: after a hard kill (`SIGKILL`) on Linux or macOS, those two group
+  routes survive (they point at the physical NIC, not the tunnel). They are
+  inert — multicast keeps flowing on the real network — and a graceful stop
+  removes them.
 
 ## Testing
 
@@ -207,3 +210,7 @@ Adapter creation, routing, and packet forwarding cannot be exercised without
 elevation and a real driver. Use `cargo run --example live_check` (elevated) for
 those — it runs the whole stack against a self-contained blocking proxy and
 prints what it sees.
+
+The macOS backend is implemented and compiles for both Apple targets but has
+not been run on real hardware from the development environment; see
+`docs/cross-platform-report.md` §8.4 for what needs a macOS machine.

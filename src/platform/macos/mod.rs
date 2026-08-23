@@ -3,12 +3,16 @@
 //! pinning, and sysctl `pcblist_n` process attribution.
 //!
 //! Implemented in Phase 2 of the cross-platform migration; see
-//! `docs/cross-platform-report.md`.
+//! `docs/cross-platform-report.md`. The code compiles for both Apple targets
+//! but has not been exercised on real hardware from the development
+//! environment — see report §8.4 for what needs a macOS machine.
 
 pub(crate) mod adapter;
 pub(crate) mod dial;
 pub(crate) mod netcfg;
 pub(crate) mod process;
+
+use std::net::SocketAddr;
 
 use crate::error::Result;
 use crate::platform::{Backend, PhysicalInterface, ProcessTable};
@@ -22,8 +26,8 @@ pub struct MacosProcessTable;
 impl Backend for MacosBackend {
     type Adapter = adapter::TunAdapter;
 
-    fn create_privileged(ipv6: bool) -> Result<Self::Adapter> {
-        adapter::TunAdapter::create(ipv6)
+    fn create_privileged(ipv6: bool, iface: &PhysicalInterface) -> Result<Self::Adapter> {
+        adapter::TunAdapter::create(ipv6, iface)
     }
 
     fn discover_physical_interface() -> PhysicalInterface {
@@ -36,8 +40,8 @@ impl Backend for MacosBackend {
 }
 
 impl ProcessTable for MacosProcessTable {
-    fn resolve_pid(local_ip: std::net::IpAddr, local_port: u16, is_udp: bool) -> Option<u32> {
-        process::resolve_pid(local_ip, local_port, is_udp)
+    fn resolve_pid(local: SocketAddr, remote: SocketAddr, is_udp: bool) -> Option<u32> {
+        process::resolve_pid(local, remote, is_udp)
     }
 
     fn process_name(pid: u32) -> Option<String> {
