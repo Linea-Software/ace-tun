@@ -9,7 +9,8 @@
 //!
 //! We never touch the system's existing default route. Instead we add the two
 //! halves of the address space as *more specific* routes pointing at the TUN
-//! adapter:
+//! adapter (see [`crate::platform::V4_SPLIT_DEFAULT`] /
+//! [`crate::platform::V6_SPLIT_DEFAULT`]):
 //!
 //! * IPv4: `0.0.0.0/1` and `128.0.0.0/1`
 //! * IPv6: `::/1` and `8000::/1`
@@ -38,25 +39,6 @@ use windows::Win32::Networking::WinSock::{
     IpDadStatePreferred, IpPrefixOriginManual, IpSuffixOriginManual, MIB_IPPROTO_NETMGMT,
     SOCKADDR_IN, SOCKADDR_IN6, SOCKADDR_INET,
 };
-
-/// The two IPv4 prefixes that together cover the whole address space while
-/// still being more specific than a `0.0.0.0/0` default route.
-pub(crate) const V4_SPLIT_DEFAULT: [(Ipv4Addr, u8); 2] = [
-    (Ipv4Addr::new(0, 0, 0, 0), 1),
-    (Ipv4Addr::new(128, 0, 0, 0), 1),
-];
-
-/// The IPv6 equivalent of [`V4_SPLIT_DEFAULT`].
-pub(crate) const V6_SPLIT_DEFAULT: [(Ipv6Addr, u8); 2] = [
-    (Ipv6Addr::new(0, 0, 0, 0, 0, 0, 0, 0), 1),
-    (Ipv6Addr::new(0x8000, 0, 0, 0, 0, 0, 0, 0), 1),
-];
-
-/// Probe destinations used to discover the physical interface that currently
-/// carries internet traffic. Any globally-routable address works; these are
-/// simply well-known and stable.
-const V4_PROBE: Ipv4Addr = Ipv4Addr::new(8, 8, 8, 8);
-const V6_PROBE: Ipv6Addr = Ipv6Addr::new(0x2001, 0x4860, 0x4860, 0, 0, 0, 0, 0x8888);
 
 /// Turn a `WIN32_ERROR` into a `Result`, treating `NO_ERROR` as success.
 fn ok(code: WIN32_ERROR) -> io::Result<()> {
@@ -107,48 +89,11 @@ pub(crate) fn sockaddr_inet(addr: IpAddr) -> SOCKADDR_INET {
     sa
 }
 
-/// The physical interface that internet traffic uses today, as discovered by
-/// asking the routing table for the best route to a public address.
-///
-/// Captured *before* we install our own routes, so it keeps pointing at the
-/// real NIC afterwards. This is what outbound sockets get pinned to — see
-/// [`crate::dial`].
-#[derive(Debug, Clone, Copy, Default)]
-pub struct PhysicalInterface {
-    /// Interface index for IPv4 traffic, if a v4 default route exists.
-    pub v4_index: Option<u32>,
-    /// Interface index for IPv6 traffic, if a v6 default route exists.
-    pub v6_index: Option<u32>,
-}
-
-impl PhysicalInterface {
-    /// Discover the current internet-facing interface for both families.
-    ///
-    /// A family with no route simply yields `None`; that is not an error,
-    /// it just means the machine has no connectivity of that kind.
-    pub fn discover() -> Self {
-        Self {
-            v4_index: best_route_index(IpAddr::V4(V4_PROBE)),
-            v6_index: best_route_index(IpAddr::V6(V6_PROBE)),
-        }
-    }
-
-    /// The interface index to pin an outbound socket to for `dest`.
-    pub fn index_for(&self, dest: IpAddr) -> Option<u32> {
-        match dest {
-            IpAddr::V4(_) => self.v4_index,
-            IpAddr::V6(_) => self.v6_index,
-        }
-    }
-
-    /// Whether any usable outbound interface was found.
-    pub fn is_empty(&self) -> bool {
-        self.v4_index.is_none() && self.v6_index.is_none()
-    }
-}
-
 /// Ask the routing table which interface would carry traffic to `dest`.
-fn best_route_index(dest: IpAddr) -> Option<u32> {
+///
+/// Used by [`crate::platform::PhysicalInterface::discover`], which runs
+/// *before* our own routes exist, so the answer describes the real network.
+pub(crate) fn best_route_index(dest: IpAddr) -> Option<u32> {
     let dest_sa = sockaddr_inet(dest);
     let mut row = MIB_IPFORWARD_ROW2::default();
     let mut best_src = SOCKADDR_INET::default();
@@ -302,34 +247,6 @@ mod tests {
         unsafe {
             assert_eq!(sa.si_family, AF_INET6);
             assert_eq!(sa.Ipv6.sin6_addr.u.Byte, addr.octets());
-        }
-    }
-
-    /// The split-default prefixes must cover the entire address space, or some
-    /// traffic would silently keep using the physical default route.
-    #[test]
-    fn split_default_covers_whole_v4_space() {
-        let [(a, alen), (b, blen)] = V4_SPLIT_DEFAULT;
-        assert_eq!((alen, blen), (1, 1));
-        assert_eq!(a.octets()[0] >> 7, 0);
-        assert_eq!(b.octets()[0] >> 7, 1);
-    }
-
-    #[test]
-    fn split_default_covers_whole_v6_space() {
-        let [(a, alen), (b, blen)] = V6_SPLIT_DEFAULT;
-        assert_eq!((alen, blen), (1, 1));
-        assert_eq!(a.octets()[0] >> 7, 0);
-        assert_eq!(b.octets()[0] >> 7, 1);
-    }
-
-    /// Route discovery must not panic or hang on a machine in any state; it is
-    /// allowed to find nothing (e.g. no IPv6 connectivity).
-    #[test]
-    fn discover_physical_interface_is_infallible() {
-        let iface = PhysicalInterface::discover();
-        if let Some(idx) = iface.v4_index {
-            assert_ne!(idx, 0, "a discovered interface index is never 0");
         }
     }
 }

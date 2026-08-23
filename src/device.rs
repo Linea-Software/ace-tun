@@ -20,6 +20,14 @@ use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio::sync::mpsc;
 use wintun::Session;
 
+/// The backend's packet-device handle, as produced by
+/// [`AdapterHandle::session`](crate::platform::AdapterHandle).
+///
+/// Each platform feeds its native session type into [`TunDevice::new`]; the
+/// device contract (one IP packet per read/write) is identical everywhere.
+#[cfg(target_os = "windows")]
+pub(crate) type SessionHandle = Arc<Session>;
+
 /// How many packets may sit between the reader thread and the netstack.
 ///
 /// Deep enough to absorb a scheduling hiccup, shallow enough that a stalled
@@ -31,7 +39,7 @@ const READ_QUEUE_DEPTH: usize = 1024;
 /// Each `poll_read` yields exactly one IP packet and each `poll_write` consumes
 /// exactly one, which is the framing `ipstack` expects.
 pub(crate) struct TunDevice {
-    session: Arc<Session>,
+    session: SessionHandle,
     rx: mpsc::Receiver<Vec<u8>>,
 }
 
@@ -41,7 +49,7 @@ impl TunDevice {
     /// The returned [`ReaderHandle`] must be joined during teardown; dropping
     /// it without stopping the session leaks the thread until the session is
     /// shut down elsewhere.
-    pub(crate) fn new(session: Arc<Session>) -> io::Result<(Self, ReaderHandle)> {
+    pub(crate) fn new(session: SessionHandle) -> io::Result<(Self, ReaderHandle)> {
         let (tx, rx) = mpsc::channel(READ_QUEUE_DEPTH);
         let reader_session = Arc::clone(&session);
 

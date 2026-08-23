@@ -6,7 +6,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use crate::callback::{ConnectionCallback, ConnectionInfo, LogCallback};
 use crate::config::ProxyConfig;
 use crate::dns::DnsCache;
-use crate::netcfg::PhysicalInterface;
+use crate::platform::PhysicalInterface;
 use crate::rule::RuleSet;
 
 /// What to do with QUIC (UDP on [`Shared::quic_port`]).

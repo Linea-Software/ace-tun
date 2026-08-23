@@ -5,40 +5,27 @@
 //! (the kernel closes handles for us). Because our routes point at the
 //! adapter's LUID, they die with it. That property is what makes the
 //! "hard-kill leaves the machine online" requirement hold without a watchdog
-//! process — see [`crate::netcfg`] for the routing rationale.
+//! process — see [`super::netcfg`] for the routing rationale.
 
-use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+use std::net::IpAddr;
 use std::sync::Arc;
 
 use windows::Win32::NetworkManagement::Ndis::NET_LUID_LH;
 use wintun::{Adapter, Session, Wintun};
 
+use crate::device::SessionHandle;
 use crate::error::{Error, Result};
-use crate::netcfg::{self, FAMILY_V4, FAMILY_V6, RouteHandle, V4_SPLIT_DEFAULT, V6_SPLIT_DEFAULT};
+use crate::platform::{
+    AdapterHandle, TUN_IPV4, TUN_IPV4_PREFIX, TUN_IPV6, TUN_IPV6_PREFIX, TUN_MTU,
+    V4_SPLIT_DEFAULT, V6_SPLIT_DEFAULT,
+};
+use super::netcfg::{self, FAMILY_V4, FAMILY_V6, RouteHandle};
 
 /// Adapter name shown in Windows' network connections list.
 pub const ADAPTER_NAME: &str = "Ace Blocker";
 
 /// WinTun "tunnel type" string; purely cosmetic, appears in the driver's logs.
 const TUNNEL_TYPE: &str = "AceBlocker";
-
-/// Address assigned to our end of the tunnel. Any traffic we pull in appears to
-/// originate here. Chosen from RFC 1918 space that is unusual enough to be
-/// unlikely to collide with a corporate LAN or a Docker bridge.
-pub const TUN_IPV4: Ipv4Addr = Ipv4Addr::new(10, 63, 7, 1);
-/// Prefix length for [`TUN_IPV4`].
-pub const TUN_IPV4_PREFIX: u8 = 24;
-
-/// IPv6 counterpart of [`TUN_IPV4`], from the unique-local range (RFC 4193).
-pub const TUN_IPV6: Ipv6Addr = Ipv6Addr::new(0xfd00, 0x0ace, 0x0007, 0, 0, 0, 0, 1);
-/// Prefix length for [`TUN_IPV6`].
-pub const TUN_IPV6_PREFIX: u8 = 64;
-
-/// MTU for the tunnel. The netstack terminates every flow and re-originates it
-/// on a socket bound to the physical NIC, so this value only governs the
-/// local application-to-tunnel segment and never causes on-the-wire
-/// fragmentation.
-pub const TUN_MTU: u16 = 1500;
 
 /// Interface metric forced onto the tunnel. Lower wins; the physical NIC is
 /// typically 5–35, so 1 makes the tunnel unambiguously preferred without
@@ -63,13 +50,12 @@ pub(crate) struct TunAdapter {
 impl TunAdapter {
     /// Create the adapter, assign addresses, and install routes.
     ///
+    /// The privilege check lives in [`Backend::create`] (see
+    /// [`crate::platform::Backend`]); this function assumes it has passed.
+    ///
     /// Routes are added last: until they exist, no traffic is diverted, so a
     /// failure partway through leaves the machine's networking untouched.
     pub(crate) fn create(ipv6: bool) -> Result<Self> {
-        if !is_elevated() {
-            return Err(Error::NotElevated);
-        }
-
         let wintun = load_wintun()?;
 
         let adapter = Adapter::create(&wintun, ADAPTER_NAME, TUNNEL_TYPE, None).map_err(|e| {
@@ -129,25 +115,20 @@ impl TunAdapter {
             _adapter: adapter,
         })
     }
+}
 
-    /// The ring-buffer session, for building the async device.
-    pub(crate) fn session(&self) -> Arc<Session> {
+impl AdapterHandle for TunAdapter {
+    fn session(&self) -> SessionHandle {
         Arc::clone(&self.session)
     }
 
-    /// Stop the session, unblocking the reader thread.
-    pub(crate) fn shutdown_session(&self) {
+    fn shutdown_session(&self) {
         if let Err(e) = self.session.shutdown() {
             tracing::warn!("wintun session shutdown failed: {e}");
         }
     }
 
-    /// Remove the routes we installed.
-    ///
-    /// Called before the adapter is dropped so connectivity is restored in the
-    /// right order. Failures are logged, not propagated: by the time teardown
-    /// runs, a missing route is the outcome we wanted anyway.
-    pub(crate) fn remove_routes(&mut self) {
+    fn remove_routes(&mut self) {
         for handle in self.routes.drain(..) {
             if let Err(e) = netcfg::delete_route(&handle) {
                 tracing::debug!("route removal returned {e} (already gone?)");
@@ -233,7 +214,7 @@ fn to_windows_luid(luid: wintun::NET_LUID_LH) -> NET_LUID_LH {
 /// WinTun cannot create an adapter without one, and the failure it returns
 /// otherwise is an opaque null pointer, so we check up front to produce an
 /// actionable error.
-fn is_elevated() -> bool {
+pub(crate) fn is_elevated() -> bool {
     use windows::Win32::Foundation::CloseHandle;
     use windows::Win32::Security::{
         GetTokenInformation, TOKEN_ELEVATION, TOKEN_QUERY, TokenElevation,
@@ -268,29 +249,11 @@ fn is_elevated() -> bool {
 mod tests {
     use super::*;
 
-    /// The tunnel addresses must not fall inside the loopback or link-local
-    /// ranges, which are handled specially by the OS and would never route.
-    #[test]
-    fn tunnel_addresses_are_routable_private_space() {
-        assert!(TUN_IPV4.is_private());
-        assert!(!TUN_IPV4.is_loopback());
-        assert!(!TUN_IPV4.is_link_local());
-        // fd00::/8 is unique-local.
-        assert_eq!(TUN_IPV6.octets()[0], 0xfd);
-    }
-
     #[test]
     fn ring_capacity_is_a_valid_power_of_two() {
         const { assert!(RING_CAPACITY.is_power_of_two()) };
         const { assert!(RING_CAPACITY >= wintun::MIN_RING_CAPACITY) };
         const { assert!(RING_CAPACITY <= wintun::MAX_RING_CAPACITY) };
-    }
-
-    /// The device read buffer is sized from the same constant the adapter is
-    /// configured with; if that ever drifts, framing breaks silently.
-    #[test]
-    fn mtu_is_within_ipstack_limits() {
-        const { assert!(TUN_MTU >= 1280, "below IPv6 minimum MTU") };
     }
 
     #[test]

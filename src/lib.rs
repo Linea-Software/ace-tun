@@ -1,13 +1,14 @@
-//! `ace-tun` — a WinTun-based transparent redirect.
+//! `ace-tun` — a transparent redirect over a virtual network adapter.
 //!
-//! The engine creates a virtual network adapter, points the routing table at
-//! it, and runs a userland TCP/IP stack over the raw IP packets that arrive.
-//! Each flow is terminated locally, matched against a rule set, and then either
-//! relayed through an upstream MITM proxy, connected straight out, or dropped.
+//! The engine creates a virtual network adapter (WinTun on Windows, a TUN
+//! device on Linux/macOS), points the routing table at it, and runs a userland
+//! TCP/IP stack over the raw IP packets that arrive. Each flow is terminated
+//! locally, matched against a rule set, and then either relayed through an
+//! upstream MITM proxy, connected straight out, or dropped.
 //!
 //! ```text
-//!   app ──routes──▶ WinTun adapter ──▶ userland netstack ──┬─▶ MITM proxy ──▶ internet
-//!                                                          └─▶ direct socket ─▶ internet
+//!   app ──routes──▶ TUN adapter ──▶ userland netstack ──┬─▶ MITM proxy ──▶ internet
+//!                                                       └─▶ direct socket ─▶ internet
 //! ```
 //!
 //! # Why not packet interception
@@ -43,11 +44,12 @@
 //!
 //! # Requirements
 //!
-//! * Administrator privileges (WinTun cannot create an adapter otherwise).
+//! * Administrator/root privileges (creating a virtual adapter requires them).
 //!   [`TunRedirect::start`] returns [`Error::NotElevated`] rather than failing
 //!   obscurely, so callers can degrade gracefully.
-//! * `wintun.dll` next to the executable. It is WireGuard's signed, permissively
-//!   licensed user-mode library; see `README.md` for bundling notes.
+//! * On Windows, `wintun.dll` next to the executable. It is WireGuard's signed,
+//!   permissively licensed user-mode library; see `README.md` for bundling
+//!   notes.
 //!
 //! # Known gaps
 //!
@@ -79,16 +81,14 @@
 
 #![cfg_attr(docsrs, feature(doc_cfg))]
 
-mod adapter;
 mod callback;
 mod config;
 mod device;
 mod dial;
 mod dns;
 mod error;
-mod netcfg;
 mod netstack;
-mod process;
+mod platform;
 mod proxy;
 mod rule;
 mod state;
@@ -101,16 +101,15 @@ use ipstack::{IpStack, IpStackConfig};
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
 
-pub use adapter::{ADAPTER_NAME, TUN_IPV4, TUN_IPV6, TUN_MTU};
 pub use callback::{ConnectionCallback, ConnectionInfo, LogCallback};
 pub use config::{ProxyConfig, ProxyType};
 pub use dns::DnsCache;
 pub use error::{Error, Result};
-pub use netcfg::PhysicalInterface;
+pub use platform::{ADAPTER_NAME, PhysicalInterface, TUN_IPV4, TUN_IPV6, TUN_MTU};
 pub use rule::{Rule, RuleAction, RuleMatch, RuleProtocol, RuleSet};
 pub use state::{QuicPolicy, StatsSnapshot};
 
-use adapter::TunAdapter;
+use platform::{AdapterHandle, Backend, BackendImpl, TunAdapter};
 use device::{ReaderHandle, TunDevice};
 use state::{Shared, Stats};
 
@@ -353,7 +352,7 @@ impl TunRedirect {
         // and the value would be identical anyway.
         let _ = self.shared.iface.set(iface);
 
-        let tun = TunAdapter::create(self.ipv6)?;
+        let tun = BackendImpl::create(self.ipv6)?;
         self.shared.log(format!(
             "adapter '{ADAPTER_NAME}' up: {TUN_IPV4} (mtu {TUN_MTU}); \
              outbound traffic pinned to interface v4={:?} v6={:?}",
