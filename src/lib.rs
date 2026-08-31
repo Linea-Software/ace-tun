@@ -96,8 +96,9 @@ mod state;
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
+use std::time::Duration;
 
-use ipstack::{IpStack, IpStackConfig};
+use ipstack::{IpStack, IpStackConfig, TcpConfig};
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
 
@@ -109,12 +110,17 @@ pub use platform::{ADAPTER_NAME, PhysicalInterface, TUN_IPV4, TUN_IPV6, TUN_MTU}
 pub use rule::{Rule, RuleAction, RuleMatch, RuleProtocol, RuleSet};
 pub use state::{QuicPolicy, StatsSnapshot};
 
-use platform::{AdapterHandle, Backend, BackendImpl, TunAdapter};
 use device::{ReaderHandle, TunDevice};
+use platform::{AdapterHandle, Backend, BackendImpl, TunAdapter};
 use state::{Shared, Stats};
 
 /// Default UDP port treated as QUIC.
 const DEFAULT_QUIC_PORT: u16 = 443;
+
+/// Idle time (seconds) before ipstack force-closes an established TCP
+/// connection with an RST. Raised from ipstack's 60s default, which silently
+/// killed long-poll and websocket connections (Zoho Mail's push channel).
+const TCP_SESSION_TIMEOUT_SECS: u64 = 15 * 60;
 
 /// Builder for a [`TunRedirect`].
 ///
@@ -363,6 +369,18 @@ impl TunRedirect {
 
         let mut cfg = IpStackConfig::default();
         cfg.mtu_unchecked(TUN_MTU);
+        // ipstack's default TCP session timeout is 60s: any established
+        // connection that carries no data for a full minute is force-closed
+        // with an RST. That silently kills exactly the connections that must
+        // stay quiet: long-polls (Zoho Mail's push channel re-polls every
+        // ~30-60s), websockets without heartbeats, and ordinary keep-alives.
+        // 15 minutes still reaps zombie connections while leaving every
+        // realistic idle pattern alone.
+        cfg.with_tcp_config({
+            let mut tcp_config = TcpConfig::default();
+            tcp_config.timeout = Duration::from_secs(TCP_SESSION_TIMEOUT_SECS);
+            tcp_config
+        });
         let stack = IpStack::new(cfg, device);
 
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
