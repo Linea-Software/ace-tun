@@ -763,6 +763,37 @@ mod tests {
         assert_eq!(decide(&shared, &f2), Decision::Direct);
     }
 
+    /// A `*.proton.me` wildcard matches every Proton *service* subdomain
+    /// (mail/calendar/drive/pass/account), not just VPN infrastructure —
+    /// documented so nobody reintroduces the overbroad rule that broke
+    /// unrelated Proton services (Issue 7). With only `*.protonvpn.com`
+    /// blocked, `mail.proton.me` must be Direct.
+    #[test]
+    fn proton_shared_services_are_not_blocked_by_vpn_domain_rule() {
+        let rules = [
+            Rule::new("*")
+                .domains("*.protonvpn.com")
+                .action(RuleAction::Block),
+            Rule::new("*").action(RuleAction::Direct),
+        ];
+        let shared = Shared::new_for_test(&rules, vec![]);
+        let d = dest("185.159.157.1", 443);
+
+        // A non-VPN Proton service on the shared identity domain stays
+        // reachable — the exact collateral damage the old rule caused.
+        let mut mail = facts(d, false, Some(7), "chrome.exe");
+        mail.domain = Some("mail.proton.me");
+        assert_eq!(decide(&shared, &mail), Decision::Direct);
+        let mut pass = facts(d, false, Some(7), "chrome.exe");
+        pass.domain = Some("pass.proton.me");
+        assert_eq!(decide(&shared, &pass), Decision::Direct);
+
+        // The VPN-specific domain is still blocked for every process.
+        let mut vpn = facts(d, false, Some(7), "chrome.exe");
+        vpn.domain = Some("api.protonvpn.com");
+        assert_eq!(decide(&shared, &vpn), Decision::Block);
+    }
+
     /// IPv6 browser traffic is proxied exactly like IPv4 — under WinDivert it
     /// bypassed interception entirely.
     #[test]
