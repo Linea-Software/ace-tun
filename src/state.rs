@@ -43,9 +43,8 @@ pub struct StatsSnapshot {
     pub blocked: u64,
     /// QUIC datagrams dropped to force a TCP fallback.
     pub quic_dropped: u64,
-    /// Flows that fell back to a direct connection after the upstream proxy
-    /// could not be reached. A non-zero value here means blocking silently
-    /// degraded — it is the number to alert on.
+    /// Legacy-named counter for flows that could not reach their required
+    /// proxy. Such flows are fail-closed and do not fall back to direct.
     pub proxy_fallbacks: u64,
     /// Multicast/broadcast flows dropped rather than relayed (mDNS, SSDP,
     /// LLMNR). Expect this to climb steadily on a busy LAN; it is normal.

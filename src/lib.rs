@@ -122,6 +122,18 @@ const DEFAULT_QUIC_PORT: u16 = 443;
 /// killed long-poll and websocket connections (Zoho Mail's push channel).
 const TCP_SESSION_TIMEOUT_SECS: u64 = 15 * 60;
 
+/// Build the userspace stack configuration used for every tunnel session.
+/// Kept separate from adapter startup so timeout policy has hermetic regression
+/// coverage and cannot silently fall back to dependency defaults.
+fn ipstack_config() -> IpStackConfig {
+    let mut config = IpStackConfig::default();
+    config.mtu_unchecked(TUN_MTU);
+    let mut tcp_config = TcpConfig::default();
+    tcp_config.timeout = Duration::from_secs(TCP_SESSION_TIMEOUT_SECS);
+    config.with_tcp_config(tcp_config);
+    config
+}
+
 /// Builder for a [`TunRedirect`].
 ///
 /// Created via [`TunRedirect::builder`].
@@ -300,8 +312,8 @@ impl TunRedirect {
 
     /// Current flow counters.
     ///
-    /// A rising [`StatsSnapshot::proxy_fallbacks`] means flows are reaching the
-    /// internet without being inspected because the proxy was unreachable.
+    /// A rising [`StatsSnapshot::proxy_fallbacks`] means required proxy
+    /// connections are failing. The affected flows are closed, not sent direct.
     pub fn stats(&self) -> StatsSnapshot {
         self.shared.snapshot()
     }
@@ -367,21 +379,9 @@ impl TunRedirect {
 
         let (device, reader) = TunDevice::new(tun.session()?)?;
 
-        let mut cfg = IpStackConfig::default();
-        cfg.mtu_unchecked(TUN_MTU);
-        // ipstack's default TCP session timeout is 60s: any established
-        // connection that carries no data for a full minute is force-closed
-        // with an RST. That silently kills exactly the connections that must
-        // stay quiet: long-polls (Zoho Mail's push channel re-polls every
-        // ~30-60s), websockets without heartbeats, and ordinary keep-alives.
-        // 15 minutes still reaps zombie connections while leaving every
-        // realistic idle pattern alone.
-        cfg.with_tcp_config({
-            let mut tcp_config = TcpConfig::default();
-            tcp_config.timeout = Duration::from_secs(TCP_SESSION_TIMEOUT_SECS);
-            tcp_config
-        });
-        let stack = IpStack::new(cfg, device);
+        // ipstack's default TCP session timeout is 60s; our configuration raises
+        // it for long-lived browser connections while still reaping zombies.
+        let stack = IpStack::new(ipstack_config(), device);
 
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
         let netstack_task =
@@ -558,6 +558,17 @@ mod tests {
             .build()
             .unwrap();
         assert!(redirect.ipv6);
+    }
+
+    #[test]
+    fn tcp_timeout_policy_does_not_fall_back_to_ipstack_default() {
+        let config = ipstack_config();
+        let expected = Duration::from_secs(TCP_SESSION_TIMEOUT_SECS);
+        assert_eq!(config.tcp_config.timeout, expected);
+        assert!(
+            config.tcp_config.timeout > Duration::from_secs(60),
+            "long-lived browser connections must outlive ipstack's 60s default"
+        );
     }
 
     #[test]

@@ -8,11 +8,9 @@
 //!
 //! # Failure posture
 //!
-//! Every decision path defaults to letting traffic through. If process lookup
-//! fails, if the rule set is empty, if the upstream proxy is down — the flow
-//! goes direct. Breaking a site the user is allowed to visit is treated as a
-//! worse outcome than missing a block, because the former makes the machine
-//! feel broken and the latter is recoverable.
+//! Unattributed traffic and explicit `Direct` rules remain fail-open. Once a
+//! rule selects `Proxy`, however, failure to reach that proxy is fail-closed:
+//! silently bypassing inspection would also bypass blocking and resistance.
 //!
 //! There are two deliberate exceptions — QUIC, and group-addressed traffic.
 //! See [`decide`].
@@ -266,11 +264,12 @@ async fn handle_tcp(mut stream: ipstack::IpStackTcpStream, shared: &Shared) -> s
         }
         Decision::Proxy(config_id) => {
             let Some(cfg) = shared.find_proxy_config(config_id).cloned() else {
-                // Configured to proxy but no proxy exists: go direct rather
-                // than black-hole the flow.
                 shared.stats.proxy_fallbacks.fetch_add(1, Ordering::Relaxed);
-                let mut upstream = dial::tcp(dest, &shared.iface()).await?;
-                tokio::io::copy_bidirectional(&mut stream, &mut upstream).await?;
+                shared.stats.blocked.fetch_add(1, Ordering::Relaxed);
+                shared.log(format!(
+                    "proxy configuration {config_id} missing for {dest}; blocking proxied flow"
+                ));
+                fail_closed(stream).await;
                 return Ok(());
             };
 
@@ -288,21 +287,27 @@ async fn handle_tcp(mut stream: ipstack::IpStackTcpStream, shared: &Shared) -> s
                     Ok(())
                 }
                 Err(e) => {
-                    // The proxy is down or refused the tunnel. Blocking here
-                    // would take the user's browser offline, so fall back to a
-                    // direct connection and record that inspection was skipped.
                     shared.stats.proxy_fallbacks.fetch_add(1, Ordering::Relaxed);
+                    shared.stats.blocked.fetch_add(1, Ordering::Relaxed);
                     shared.log(format!(
-                        "proxy unavailable for {dest} ({e}); falling back to direct — \
-                         this flow was NOT inspected"
+                        "proxy unavailable for {dest} ({e}); blocking proxied flow"
                     ));
-                    let mut upstream = dial::tcp(dest, &shared.iface()).await?;
-                    tokio::io::copy_bidirectional(&mut stream, &mut upstream).await?;
+                    fail_closed(stream).await;
                     Ok(())
                 }
             }
         }
     }
+}
+
+/// Terminate a flow selected for proxying when its required proxy is absent.
+/// Shutting down the intercepted side makes the failure observable to callers
+/// without ever opening a direct socket to the destination.
+async fn fail_closed<S>(mut stream: S)
+where
+    S: tokio::io::AsyncWrite + Unpin,
+{
+    let _ = stream.shutdown().await;
 }
 
 /// Relay one UDP flow, snooping DNS responses on the way back.
@@ -438,6 +443,15 @@ mod tests {
             process_name: name,
             domain: None,
         }
+    }
+
+    #[tokio::test]
+    async fn unavailable_proxy_closes_intercepted_flow_instead_of_falling_back() {
+        let (mut browser, intercepted) = tokio::io::duplex(64);
+        fail_closed(intercepted).await;
+
+        let mut byte = [0_u8; 1];
+        assert_eq!(browser.read(&mut byte).await.unwrap(), 0);
     }
 
     /// Browser TCP 443 must reach the proxy — the core happy path.
